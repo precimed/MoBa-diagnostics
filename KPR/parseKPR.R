@@ -1,15 +1,18 @@
+# --- Adapted to the 2026-10-07 delivery: paths and settings come from 00_config.R ---
+source("00_config.R")
+
 # Parse KPR
 library(haven)
 library(data.table)
 
 # File locations ----------------------------------------------------------
 # Where output files should be written
-dirWorking <- "/ess/p697/cluster/users/parekh/2025-05-22_KPR"
+dirWorking <- dirOutKPR
 setwd(dirWorking)
 
 # Latest SV_INFO file
 dirSVINFO   <- "/tsd/p697/data/durable/phenotypes/sv_infofiles"
-fileCurrent <- list.files(path = dirSVINFO, pattern = glob2rx("PDB2445_SV_INFO*.sav"))
+fileCurrent <- svInfoFile
 if (length(fileCurrent) > 1)
 {
   stop('More than one current version of INFO file found; script is not designed for this')
@@ -17,19 +20,19 @@ if (length(fileCurrent) > 1)
 SVINFOFile  <- fileCurrent[1]
 
 # Merged and linked KPR
-dirKPR      <- "/ess/p697/cluster/users/parekh/2025-05-22_KPR"
-KPRFile     <- paste(as.character(Sys.Date()), "-MoBa-LinkedKPR-AllSubjects.csv", sep = "")
+dirKPR      <- dirOutKPR
+KPRFile     <- paste(runTag, "-MoBa-LinkedKPR-AllSubjects.csv", sep = "")
 
 # Withdrawn consent
-dirConsent  <- "/ess/p697/cluster/users/parekh/2025-05-22_KPR"
-consentFile <- paste(as.character(Sys.Date()), "-MoBa-WithdrawnList.csv", sep = "")
+dirConsent  <- dirOutKPR
+consentFile <- paste(runTag, "-MoBa-WithdrawnList.csv", sep = "")
 
 # Invalid NFR
 fileInvalid <- list.files(path = dirSVINFO, pattern = glob2rx("*invalid*.csv"))
 
 # Read files --------------------------------------------------------------
 # dataKPR     <- read.csv(file.path(dirKPR,      KPRFile),     sep = "\t")
-dataKPR     <- fread(file = file.path(dirKPR,   KPRFile),   sep = "\t")
+dataKPR     <- fread(file = file.path(dirKPR,   KPRFile),   sep = "\t", colClasses = list(character = c("MunicipalityNumber", "TreatmentMunicipality", "CountyNumber", "TreatmentCounty")))   # 2026-11: keep leading zeros in municipality/county numbers
 withdrawn   <- read.csv(file.path(dirConsent,  consentFile), sep = "\t")
 dataInfo    <- read_sav(file.path(dirSVINFO,   SVINFOFile))
 dataInvalid <- read.csv(file.path(dirSVINFO,  fileInvalid), sep = "\t") 
@@ -87,15 +90,23 @@ dataKPR_ICD <- dataKPR[!loc_ICPC,]
 
 stopifnot(nrow(dataKPR_ICPC) + nrow(dataKPR_ICD) - nrow(dataKPR) == 0)
 
+# 2026-10: bills without a diagnosis (now kept after the fix in mergeKPR.R) have an
+# empty DiagnosisCode. They stay in "ParsedKPR-All" but not in the diagnosis tables.
+emptyCode      <- function(x) is.na(x) | x == ""
+cat("Rows without a diagnosis code kept out of the diagnosis tables:",
+    sum(emptyCode(dataKPR_ICD$DiagnosisCode)) + sum(emptyCode(dataKPR_ICPC$DiagnosisCode)), "\n")
+dataKPR_ICD  <- dataKPR_ICD[!emptyCode(dataKPR_ICD$DiagnosisCode), ]
+dataKPR_ICPC <- dataKPR_ICPC[!emptyCode(dataKPR_ICPC$DiagnosisCode), ]
+
 
 ## Save versions of data at this point - before counting
-outputName <- paste(as.character(Sys.Date()), "-MoBa-ParsedKPR-All.csv", sep = "")
+outputName <- paste(runTag, "-MoBa-ParsedKPR-All.csv", sep = "")
 fwrite(dataKPR, file = file.path(dirWorking, outputName), sep = "\t", row.names = F)
 
-outputName <- paste(as.character(Sys.Date()), "-MoBa-ParsedKPR-Manual-ICPC.csv", sep = "")
+outputName <- paste(runTag, "-MoBa-ParsedKPR-Manual-ICPC.csv", sep = "")
 fwrite(dataKPR_ICPC, file = file.path(dirWorking, outputName), sep = "\t", row.names = F)
 
-outputName <- paste(as.character(Sys.Date()), "-MoBa-ParsedKPR-Manual-ICD10.csv", sep = "")
+outputName <- paste(runTag, "-MoBa-ParsedKPR-Manual-ICD10.csv", sep = "")
 fwrite(dataKPR_ICD, file = file.path(dirWorking, outputName), sep = "\t", row.names = F)
 
 
@@ -165,159 +176,22 @@ colnames(dataKPR_ICPC)[colnames(dataKPR_ICPC) == "ID"] <- "ID_2445"
 colnames(dataKPR_ICD)[colnames(dataKPR_ICD) == "ID"]   <- "ID_2445"
 
 
-# Unique ICD10 codes and time points -------------------------------------
-uqICDCodes    <- sort(unique(dataKPR_ICD$DiagnosisCode))
-uqTimePoints  <- sort(unique(dataKPR_ICD$Year))
+# Long diagnosis files + wide 0/1 files (2026-10) --------------------------
+# As for NPR: the 0/1 files are saved as parquet (common.R) with the same column
+# names as before. KPR codes are already three characters, so no major-code files.
+source(file.path(dirScripts, "common.R"))
+toDx <- function(d) d[, .(ID_2445 = as.character(ID_2445), Role, PREG_ID_2445, ChildNumber,
+                           WithdrawnConsent18years, Year = as.integer(Year), Code = DiagnosisCode)]
+dxICD  <- unique(toDx(dataKPR_ICD))
+dxICPC <- unique(toDx(dataKPR_ICPC))
+rm(dataKPR_ICD, dataKPR_ICPC); invisible(gc())
 
-# Last year for which we have data? ---------------------------------------
-lastYear <- as.numeric(uqTimePoints[length(uqTimePoints)])
+fwrite(dxICD,  file.path(dirWorking, paste0(runTag, "-MoBa-ParsedKPR_ICD10_diagnoses.csv")), sep = "\t")
+fwrite(dxICPC, file.path(dirWorking, paste0(runTag, "-MoBa-ParsedKPR_ICPC_diagnoses.csv")),  sep = "\t")
+cat("ICD-10:", uniqueN(dxICD$ID_2445),  "persons,", uniqueN(dxICD$Code),  "codes\n")
+cat("ICPC-2:", uniqueN(dxICPC$ID_2445), "persons,", uniqueN(dxICPC$Code), "codes\n")
 
-# Combine ICD10 and time points -------------------------------------------
-allUqComb_ICD   <- ""
-for (time in uqTimePoints)
-{
-  allUqComb_ICD <- c(allUqComb_ICD, paste(uqICDCodes, time, sep = "_"))
-}
-allUqComb_ICD   <- allUqComb_ICD[allUqComb_ICD != ""]
-allUqComb_ICD   <- sort(allUqComb_ICD)
-
-
-# Reorganize ICD ----------------------------------------------------------
-dataKPR_ICD     <- dataKPR_ICD[, c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", 
-                           "WithdrawnConsent18years", "Year", "DiagnosisCode")]
-
-# Generate a temporary table having only unique information from KPR ICD ------
-temp        <- dataKPR_ICD[, c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", "WithdrawnConsent18years")]
-temp        <- unique(temp)
-temp        <- temp[order(temp$ID_2445), ]
-
-
-# Compile information -----------------------------------------------------
-# Initialize
-allColNames_ICD       <- c("ID_2445", "Role", "PREG_ID_2445", "ChildNumber", 
-                           "WithdrawnConsent18years", paste(uqICDCodes, "_lifetime", sep = ""), 
-                           allUqComb_ICD, gsub("_", "_x", allUqComb_ICD))
-DiagInfo_ICD           <- data.frame(matrix(nrow = nrow(temp), ncol = length(allColNames_ICD), data = 0))
-colnames(DiagInfo_ICD) <- allColNames_ICD
-
-# Assign information from temp
-DiagInfo_ICD[, 1:5]    <- temp
-
-for (diag in uqICDCodes)
-{
-  for (time in uqTimePoints)
-  {
-    # Find IDs which have this diagnosis at this time point (cross sectional)
-    whichIDs  <- dataKPR_ICD$ID_2445[dataKPR_ICD$DiagnosisCode == diag & dataKPR_ICD$Year == time]
-    
-    # Columns to mark
-    whichCols <- paste(diag, time, sep = "_x")
-    
-    # Where are these IDs - logical
-    locIDs    <- DiagInfo_ICD$ID_2445 %in% whichIDs
-    
-    # Mark
-    DiagInfo_ICD[locIDs, whichCols] <- 1
-    
-    # Find IDs which have this diagnosis up to this time point (cumulative)
-    whichIDs  <- dataKPR_ICD$ID_2445[dataKPR_ICD$DiagnosisCode == diag & dataKPR_ICD$Year == time]
-    
-    # Columns to mark
-    whichCols <- paste(diag, time:lastYear, sep = "_")
-    
-    # Mark
-    DiagInfo_ICD[locIDs, whichCols] <- 1
-  }
-  # Info for lifetime - sum across all time points
-  # Which columns to sum across=
-  whichCols       <- c(paste(diag, uqTimePoints, sep = "_x"), paste(diag, uqTimePoints, sep = "_"))
-  
-  # Where to mark?
-  toMark          <- paste(diag, "_lifetime", sep = "")
-  
-  # Mark
-  DiagInfo_ICD[, toMark] <- as.integer(as.logical(rowSums(DiagInfo_ICD[, whichCols])))
-}
-
-# Save results ------------------------------------------------------------
-outputName <- paste(as.character(Sys.Date()), "-MoBa-ParsedKPR_ICD10Codes.csv", sep = "")
-fwrite(DiagInfo_ICD, file = file.path(dirWorking, outputName), sep = "\t", row.names = F)
-
-
-# Unique ICPC codes and time points -------------------------------------
-uqICPCCodes    <- sort(unique(dataKPR_ICPC$DiagnosisCode))
-uqTimePoints  <- sort(unique(dataKPR_ICPC$Year))
-
-# Last year for which we have data? ---------------------------------------
-lastYear <- as.numeric(uqTimePoints[length(uqTimePoints)])
-
-# Combine ICPC10 and time points -------------------------------------------
-allUqComb_ICPC   <- ""
-for (time in uqTimePoints)
-{
-  allUqComb_ICPC <- c(allUqComb_ICPC, paste(uqICPCCodes, time, sep = "_"))
-}
-allUqComb_ICPC   <- allUqComb_ICPC[allUqComb_ICPC != ""]
-allUqComb_ICPC   <- sort(allUqComb_ICPC)
-
-
-# Reorganize ICPC ----------------------------------------------------------
-dataKPR_ICPC     <- dataKPR_ICPC[, c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", 
-                                     "WithdrawnConsent18years", "Year", "DiagnosisCode")]
-
-# Generate a temporary table having only unique information from KPR ICPC ------
-temp        <- dataKPR_ICPC[, c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", "WithdrawnConsent18years")]
-temp        <- unique(temp)
-temp        <- temp[order(temp$ID_2445), ]
-
-
-# Compile information -----------------------------------------------------
-# Initialize
-allColNames_ICPC       <- c("ID_2445", "Role", "PREG_ID_2445", "ChildNumber", 
-                            "WithdrawnConsent18years", paste(uqICPCCodes, "_lifetime", sep = ""), 
-                            allUqComb_ICPC, gsub("_", "_x", allUqComb_ICPC))
-DiagInfo_ICPC           <- data.frame(matrix(nrow = nrow(temp), ncol = length(allColNames_ICPC), data = 0))
-colnames(DiagInfo_ICPC) <- allColNames_ICPC
-
-# Assign information from temp
-DiagInfo_ICPC[, 1:5]    <- temp
-
-for (diag in uqICPCCodes)
-{
-  for (time in uqTimePoints)
-  {
-    # Find IDs which have this diagnosis at this time point (cross sectional)
-    whichIDs  <- dataKPR_ICPC$ID_2445[dataKPR_ICPC$DiagnosisCode == diag & dataKPR_ICPC$Year == time]
-    
-    # Columns to mark
-    whichCols <- paste(diag, time, sep = "_x")
-    
-    # Where are these IDs - logical
-    locIDs    <- DiagInfo_ICPC$ID_2445 %in% whichIDs
-    
-    # Mark
-    DiagInfo_ICPC[locIDs, whichCols] <- 1
-    
-    # Find IDs which have this diagnosis up to this time point (cumulative)
-    whichIDs  <- dataKPR_ICPC$ID_2445[dataKPR_ICPC$DiagnosisCode == diag & dataKPR_ICPC$Year == time]
-    
-    # Columns to mark
-    whichCols <- paste(diag, time:lastYear, sep = "_")
-    
-    # Mark
-    DiagInfo_ICPC[locIDs, whichCols] <- 1
-  }
-  # Info for lifetime - sum across all time points
-  # Which columns to sum across=
-  whichCols       <- c(paste(diag, uqTimePoints, sep = "_x"), paste(diag, uqTimePoints, sep = "_"))
-  
-  # Where to mark?
-  toMark          <- paste(diag, "_lifetime", sep = "")
-  
-  # Mark
-  DiagInfo_ICPC[, toMark] <- as.integer(as.logical(rowSums(DiagInfo_ICPC[, whichCols])))
-}
-
-# Save results ------------------------------------------------------------
-outputName <- paste(as.character(Sys.Date()), "-MoBa-ParsedKPR_ICPCCodes.csv", sep = "")
-fwrite(DiagInfo_ICPC, file = file.path(dirWorking, outputName), sep = "\t", row.names = F)
+makeWideFiles(dxICD,  file.path(dirWorking, paste0(runTag, "-MoBa-ParsedKPR")),
+              nameMinor = "ICD10Codes", maxCells = maxCells)
+makeWideFiles(dxICPC, file.path(dirWorking, paste0(runTag, "-MoBa-ParsedKPR")),
+              nameMinor = "ICPCCodes",  maxCells = maxCells)

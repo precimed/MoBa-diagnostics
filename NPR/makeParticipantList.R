@@ -1,14 +1,20 @@
+# --- Adapted to the 2026-10-07 delivery: paths and settings come from 00_config.R ---
+source("00_config.R")
+
 # Generate a list of all participants that were ever in PDB2445 (MoBa-wide participant list)
 # Preliminaries -----------------------------------------------------------
 library(haven)
 
 
 # Define paths etc --------------------------------------------------------
-dirOutput       <- "/ess/p697/cluster/users/parekh/2025-05-21_NPR"
-dirOldRecords   <- "/tsd/p697/data/durable/phenotypes/sv_infofiles/Old"
+dirOutput       <- dirOutNPR
+dirOldRecords   <- "/tsd/p697/data/durable/phenotypes/sv_infofiles/old"
 dirCurrRecords  <- "/tsd/p697/data/durable/phenotypes/sv_infofiles/"
-fileCurrent     <- list.files(path = dirCurrRecords, pattern = glob2rx("PDB2445_SV_INFO*.sav"))
-filesOld        <- list.files(path = dirOldRecords,  pattern = glob2rx("PDB2445_SV_INFO*.sav"))
+fileCurrent     <- svInfoFile
+# 2026-10: full paths; older SV_INFO versions may sit both in Old/ and in the main folder
+filesOld        <- c(list.files(path = dirOldRecords,  pattern = glob2rx("PDB2445_SV_INFO*.sav"), full.names = TRUE),
+                     file.path(dirCurrRecords, setdiff(list.files(path = dirCurrRecords, pattern = glob2rx("PDB2445_SV_INFO*.sav")), svInfoFile)))
+cat("Older SV_INFO files used:", basename(filesOld), sep = "\n  ")
 setwd(dirOutput)
 
 if (length(fileCurrent) > 1)
@@ -19,16 +25,16 @@ if (length(fileCurrent) > 1)
 
 # Read all files ----------------------------------------------------------
 currentInfo     <- read_sav(file = file.path(dirCurrRecords, fileCurrent[1]))
-oldInfo         <- read_sav(file = file.path(dirOldRecords,  filesOld[1]))
+oldInfo         <- read_sav(file = filesOld[1])
 
 # Drop any other column except PREG_ID_2445, M_ID_2445, and F_ID_2445
 colKeep         <- c("PREG_ID_2445", "M_ID_2445", "F_ID_2445")
 oldInfo         <- oldInfo[, colKeep]
 
 # Read additional old records
-for (files in filesOld[2:length(filesOld)])
+for (files in filesOld[-1])
 {
-  temp          <- read_sav(file = file.path(dirOldRecords, files))
+  temp          <- read_sav(file = files)
   temp          <- temp[, colKeep]
   oldInfo       <- rbind(oldInfo, temp)
 }
@@ -159,11 +165,11 @@ if (length(borderline_F_ID) != 0)
 
 
 # Save tables -------------------------------------------------------------
-outputName <- paste(as.character(Sys.Date()), "-MoBa-CompleteParticipantList.csv", sep = "")
+outputName <- paste(runTag, "-MoBa-CompleteParticipantList.csv", sep = "")
 write.table(allSubjects, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
 
-outputName <- paste(as.character(Sys.Date()), "-MoBa-KeepList.csv", sep = "")
+outputName <- paste(runTag, "-MoBa-KeepList.csv", sep = "")
 write.table(keep_data, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
 
-outputName <- paste(as.character(Sys.Date()), "-MoBa-WithdrawnList.csv", sep = "")
+outputName <- paste(runTag, "-MoBa-WithdrawnList.csv", sep = "")
 write.table(withdrawn_data, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)

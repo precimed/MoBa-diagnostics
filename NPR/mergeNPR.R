@@ -1,3 +1,6 @@
+# --- Adapted to the 2026-10-07 delivery: paths and settings come from 00_config.R ---
+source("00_config.R")
+
 # Read the new NPR files (sector-wise distributed csv files) and create a
 # composite file with mapping etc.
 
@@ -8,11 +11,11 @@
 
 # File locations ----------------------------------------------------------
 # Where output files should be written
-dirWorking <- "/ess/p697/cluster/users/parekh/2025-05-21_NPR"
+dirWorking <- dirOutNPR
 setwd(dirWorking)
 
 # Current location of updated NPR files
-dirNPR <- "/tsd/p697/data/durable/phenotypes/npr/2025-05-15/rawdata"
+dirNPR <- dirRawNPR
 
 # Find and read files for each sector -------------------------------------
 # Using glob2rx("AVT*Aktivitet*.csv") for creating regular expression: this
@@ -44,6 +47,15 @@ SOM_Conditions  <- read.csv(file.path(dirNPR, list.files(path = dirNPR, pattern 
 TSB_Activity    <- read.csv(file.path(dirNPR, list.files(path = dirNPR, pattern = glob2rx("TSB*aktivitet*.csv"))),  sep = ";")
 TSB_Conditions  <- read.csv(file.path(dirNPR, list.files(path = dirNPR, pattern = glob2rx("TSB*koder*.csv"))), sep = ";")
 
+
+# 2026-10: make column names lower case, as the rest of the script expects
+for (obj in c("AVT_Activity", "AVT_Conditions", "PHBU_Activity", "PHBU_Conditions",
+              "PHV_Activity", "PHV_Conditions", "REH_Activity", "REH_Conditions",
+              "SOM_Activity", "SOM_Conditions", "TSB_Activity", "TSB_Conditions"))
+{
+  tmp <- get(obj); colnames(tmp) <- tolower(colnames(tmp)); assign(obj, tmp)
+}
+rm(tmp)
 
 # Merge tables ------------------------------------------------------------ 
 # In this section, we perform outerjoin operations to merge Conditions tables 
@@ -177,6 +189,8 @@ colnames(NPR_full)[colnames(NPR_full) == "akse"]                 <- "Diagnosis_A
 colnames(NPR_full)[colnames(NPR_full) == "Source"]               <- "SourceTableName"
 colnames(NPR_full)[colnames(NPR_full) == "errehabilitering"]     <- "REH_partOf_SOM"
 colnames(NPR_full)[colnames(NPR_full) == "overligger"]           <- "Unfinished_WardStay"
+# 2026-10: AVT now holds both somatic and mental-health specialists in one file (sektor = SOM/PHV)
+colnames(NPR_full)[colnames(NPR_full) == "sektor"]               <- "AVT_Sector"
 
 # colnames(NPR_full)[colnames(NPR_full) == "rusinstID"]            <- "InstitutionID_Addiction"
 # colnames(NPR_full)[colnames(NPR_full) == "Procedures_prosnr"]    <- "Procedures_OrderNumber"
@@ -191,7 +205,7 @@ NPR_full$Duration <- NPR_full$DiffDays_Discharge - NPR_full$DiffDays_Admission
 
 
 # Reorder columns ---------------------------------------------------------
-NPR_full2 <- NPR_full[, c("SerialNumber", "SourceTableName", 
+wantedCols <- c("SerialNumber", "SourceTableName", "AVT_Sector", 
                           "Year", "DiffDays_Admission", "DiffDays_Discharge", "Duration", 
                           "Somatic_LevelofCare", "Somatic_LevelofCare_2008_2009", 
                           "Somatic_TreatmentClinic_Derived", 
@@ -203,8 +217,14 @@ NPR_full2 <- NPR_full[, c("SerialNumber", "SourceTableName",
                           "Diagnosis_Axis", "ChildCodeSequence", 
                           "Procedures_CodeNumber", "Procedures_NCMPNCSPCode", 
                           "REH_partOf_SOM", "Unfinished_WardStay", 
-                          "Original_kodenr", "Original_kodeverdi")]
+                          "Original_kodenr", "Original_kodeverdi")
+# 2026-10: keep only columns that exist, and report any that are missing
+missingCols <- setdiff(wantedCols, colnames(NPR_full))
+if (length(missingCols)) warning("Columns not found in this delivery: ", paste(missingCols, collapse = ", "))
+extraCols   <- setdiff(colnames(NPR_full), c(wantedCols, "kodenavn", "kodetype", "kodenr", "kodeverdi"))
+if (length(extraCols)) message("Columns in the delivery that are not carried forward: ", paste(extraCols, collapse = ", "))
+NPR_full2   <- NPR_full[, intersect(wantedCols, colnames(NPR_full))]
 
 # Save merged NPR ---------------------------------------------------------
-outputName <- paste(as.character(Sys.Date()), "-MoBa-MergedNPR.csv", sep = "")
+outputName <- paste(runTag, "-MoBa-MergedNPR.csv", sep = "")
 write.table(NPR_full2, file = file.path(dirWorking, outputName), sep = "\t", row.names = F)

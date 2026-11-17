@@ -1,12 +1,15 @@
+# --- Adapted to the 2026-10-07 delivery: paths and settings come from 00_config.R ---
+source("00_config.R")
+
 # Compile info on first contact for each diagnoses
 library(data.table)
 
 # Read parsed NPR
-dirNPR  <- "/ess/p697/cluster/users/parekh/2025-05-21_NPR"
-dataNPR <- fread(file.path(dirNPR, "2025-05-22-MoBa-ParsedNPR.csv"), sep = "\t")
+dirNPR  <- dirOutNPR
+dataNPR <- fread(file.path(dirNPR, paste0(runTag, "-MoBa-ParsedNPR.csv")), sep = "\t")
 
 # Variables to ignore -----------------------------------------------------
-varsToIgnore <- c("SerialNumber",                    "Key", 
+varsToIgnore <- c("SerialNumber",                    "Key",                 "AVT_Sector",
                   "SourceTableName",                 
                   "Somatic_LevelofCare",             "Somatic_LevelofCare_2008_2009",
                   "Somatic_LevelofCare_from2010",    "Somatic_TreatmentClinic_Derived",
@@ -105,5 +108,5 @@ for (codes in uqICDCodes)
 }
 
 # Save
-outputName  <- paste(as.character(Sys.Date()), "-MoBa-SmallestDiffDate-allCodes.csv", sep = "")
+outputName  <- paste(runTag, "-MoBa-SmallestDiffDate-allCodes.csv", sep = "")
 fwrite(diagInformation, file = file.path(dirNPR, outputName), sep = "\t", row.names = F)

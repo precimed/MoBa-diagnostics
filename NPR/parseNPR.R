@@ -1,3 +1,6 @@
+# --- Adapted to the 2026-10-07 delivery: paths and settings come from 00_config.R ---
+source("00_config.R")
+
 # Parse NPR data to generate some usable file format
 # Start timer
 library(haven)
@@ -6,12 +9,12 @@ startTime <- proc.time()
 
 # File locations ----------------------------------------------------------
 # Where output files should be written
-dirOutput   <- "/ess/p697/cluster/users/parekh/2025-05-21_NPR"
+dirOutput   <- dirOutNPR
 setwd(dirOutput)
 
 # Latest SV_INFO file
 dirSVINFO   <- "/tsd/p697/data/durable/phenotypes/sv_infofiles"
-fileCurrent <- list.files(path = dirSVINFO, pattern = glob2rx("PDB2445_SV_INFO*.sav"))
+fileCurrent <- svInfoFile
 if (length(fileCurrent) > 1)
 {
   stop('More than one current version of INFO file found; script is not designed for this')
@@ -19,12 +22,12 @@ if (length(fileCurrent) > 1)
 SVINFOFile  <- fileCurrent[1]
 
 # Merged and linked NPR
-dirNPR      <- "/ess/p697/cluster/users/parekh/2025-05-21_NPR"
-NPRFile     <- paste(as.character(Sys.Date()), "-MoBa-LinkedNPR-AllSubjects.csv", sep = "")
+dirNPR      <- dirOutNPR
+NPRFile     <- paste(runTag, "-MoBa-LinkedNPR-AllSubjects.csv", sep = "")
 
 # Withdrawn consent
-dirConsent  <- "/ess/p697/cluster/users/parekh/2025-05-21_NPR"
-consentFile <- paste(as.character(Sys.Date()), "-MoBa-WithdrawnList.csv", sep = "")
+dirConsent  <- dirOutNPR
+consentFile <- paste(runTag, "-MoBa-WithdrawnList.csv", sep = "")
 
 # Invalid NFR
 fileInvalid <- list.files(path = dirSVINFO, pattern = glob2rx("*invalid*.csv"))
@@ -88,13 +91,14 @@ dataNPR$Procedures_NCMPNCSPCode[dataNPR$Procedures_NCMPNCSPCode == "S\x8fR"] <- 
 dataNPR$Procedures_NCMPNCSPCode <- toupper(dataNPR$Procedures_NCMPNCSPCode)
 
 # Save a version of data at this point - before counting
-outputName <- paste(as.character(Sys.Date()), "-MoBa-ParsedNPR.csv", sep = "")
+outputName <- paste(runTag, "-MoBa-ParsedNPR.csv", sep = "")
 fwrite(dataNPR, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
+
 # write.table(dataNPR, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
 
 
 # Variables to ignore -----------------------------------------------------
-varsToIgnore <- c("SerialNumber",                    "Key", 
+varsToIgnore <- c("SerialNumber",                    "Key",                 "AVT_Sector",
                   "SourceTableName",                 "DiffDays_Admission",
                   "DiffDays_Discharge",              "Duration",
                   "Somatic_LevelofCare",             "Somatic_LevelofCare_2008_2009",
@@ -149,251 +153,22 @@ dataNPR     <- dataNPR[, ..toEliminate]
 colnames(dataNPR)[colnames(dataNPR) == "ID"] <- "ID_2445"
 
 
-# Unique ICD10 codes and time points -------------------------------------
-uqICDCodes    <- sort(unique(dataNPR$Diagnosis_ICDCode))
-uqTimePoints  <- sort(unique(dataNPR$Year))
+# Long diagnosis file + wide 0/1 files (2026-10) ---------------------------
+# Following Pravesh's suggestion, the 0/1 files are saved as parquet instead of csv,
+# built in blocks of persons so they fit in memory (common.R). Column names are
+# the same as before (<code>_lifetime, <code>_<year>, <code>_x<year>).
+source(file.path(dirScripts, "common.R"))
+dx <- dataNPR[, .(ID_2445 = as.character(ID_2445), Role, PREG_ID_2445, ChildNumber,
+                  WithdrawnConsent18years, Year = as.integer(Year), Code = Diagnosis_ICDCode)]
+rm(dataNPR); invisible(gc())
 
+# Long diagnosis file: one row per person, code and year (used by doCounts.R)
+outputName <- paste(runTag, "-MoBa-ParsedNPR_diagnoses.csv", sep = "")
+fwrite(unique(dx), file = file.path(dirOutput, outputName), sep = "\t")
+cat("Diagnoses:", nrow(unique(dx)), "rows,", uniqueN(dx$ID_2445), "persons,",
+    uniqueN(dx$Code), "codes, years", paste(range(dx$Year), collapse = "-"), "\n")
 
-# Last year for which we have data? ---------------------------------------
-lastYear <- as.numeric(uqTimePoints[length(uqTimePoints)])
-
-# Combine ICD10 and time points -------------------------------------------
-allUqComb   <- ""
-for (time in uqTimePoints)
-{
-  allUqComb <- c(allUqComb, paste(uqICDCodes, time, sep = "_"))
-}
-allUqComb   <- allUqComb[allUqComb != ""]
-allUqComb   <- sort(allUqComb)
-
-
-# Reorganize NPR ----------------------------------------------------------
-dataNPR     <- dataNPR[, c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", 
-                           "WithdrawnConsent18years", "Year", "Diagnosis_ICDCode")]
-
-
-# Generate a temporary table having only unique information from NPR ------
-temp        <- dataNPR[, c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", "WithdrawnConsent18years")]
-temp        <- unique(temp)
-temp        <- temp[order(temp$ID_2445), ]
-
-
-# Compile information -----------------------------------------------------
-# Initialize
-allColNames             <- c("ID_2445", "Role", "PREG_ID_2445", "ChildNumber", 
-                             "WithdrawnConsent18years", paste(uqICDCodes, "_lifetime", sep = ""), 
-                             allUqComb, gsub("_", "_x", allUqComb))
-MinorDiagInfo           <- data.frame(matrix(nrow = nrow(temp), ncol = length(allColNames), data = 0))
-colnames(MinorDiagInfo) <- allColNames
-
-# Assign information from temp
-MinorDiagInfo[, 1:5]    <- temp
-
-startTime <- proc.time()
-for (diag in uqICDCodes)
-{
-  for (time in uqTimePoints)
-  {
-    # Find IDs which have this diagnosis at this time point (cross sectional)
-    whichIDs  <- dataNPR$ID_2445[dataNPR$Diagnosis_ICDCode == diag & dataNPR$Year == time]
-    
-    # Columns to mark
-    whichCols <- paste(diag, time, sep = "_x")
-    
-    # Where are these IDs - logical
-    locIDs    <- MinorDiagInfo$ID_2445 %in% whichIDs
-    
-    # Mark
-    MinorDiagInfo[locIDs, whichCols] <- 1
-    
-    # Find IDs which have this diagnosis up to this time point (cumulative)
-    whichIDs  <- dataNPR$ID_2445[dataNPR$Diagnosis_ICDCode == diag & dataNPR$Year == time]
-    
-    # Columns to mark
-    whichCols <- paste(diag, time:lastYear, sep = "_")
-    
-    # Mark
-    MinorDiagInfo[locIDs, whichCols] <- 1
-  }
-  # Info for lifetime - sum across all time points
-  # Which columns to sum across=
-  whichCols       <- c(paste(diag, uqTimePoints, sep = "_x"), paste(diag, uqTimePoints, sep = "_"))
-  
-  # Where to mark?
-  toMark          <- paste(diag, "_lifetime", sep = "")
-  
-  # Mark
-  MinorDiagInfo[, toMark] <- as.integer(as.logical(rowSums(MinorDiagInfo[, whichCols])))
-}
-
-
-# Convert minor codes to major codes --------------------------------------
-allMajorCodes     <- unique(substring(uqICDCodes, 1, 3))
-allMajorUqComb    <- ""
-for (time in uqTimePoints)
-{
-  allMajorUqComb  <- c(allMajorUqComb, paste(allMajorCodes, time, sep = "_"))
-}
-allMajorUqComb    <- allMajorUqComb[allMajorUqComb != ""]
-allMajorUqComb    <- sort(allMajorUqComb)
-
-
-# Compile major codes -----------------------------------------------------
-# Initialize results table
-allMajColNames                <- c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", 
-                                   "WithdrawnConsent18years", paste(allMajorCodes, "_lifetime", sep = ""),
-                                   allMajorUqComb, gsub("_", "_x", allMajorUqComb))
-MajorDiagInfo                 <- data.frame(matrix(nrow = nrow(temp), ncol = length(allMajColNames), data = 0))
-colnames(MajorDiagInfo)       <- allMajColNames
-
-# Copy information over from minor codes table
-MajorDiagInfo[, 1:5]          <- MinorDiagInfo[, 1:5]
-
-# Counting here is simpler - regular expression for every diagnostic category; pool
-tmpColNames                   <- colnames(MinorDiagInfo)
-count                         <- 1
-matchedColumns                <- matrix("", nrow = length(allMajorUqComb), ncol = 1)
-for (cols in allMajorUqComb)
-{
-  matchCols                   <- grep(glob2rx(paste(substr(cols, 1, 3), "*", substr(cols, nchar(cols)-4, nchar(cols)), sep = "")), tmpColNames)
-  if (length(matchCols) > 1)
-  {
-    MajorDiagInfo[,cols]      <- as.integer(as.logical(rowSums(MinorDiagInfo[,matchCols])))
-  }
-  else
-  {
-    MajorDiagInfo[,cols]      <- as.integer(as.logical(MinorDiagInfo[,matchCols]))
-  }
-  
-  if (length(matchCols) > 1)
-  {
-    matchedColumns[count]     <- toString(paste(tmpColNames[matchCols], "", sep = ""))
-  }
-  else
-  {
-    matchedColumns[count]     <- toString(tmpColNames[matchCols])
-  }
-  count <- count + 1
-}
-
-
-# Repeat for cross-sectional ----------------------------------------------
-namesCross                    <- gsub("_", "_x", allMajorUqComb)
-count                         <- 1
-matchedxColumns               <- ""
-for (cols in namesCross)
-{
-  matchCols                   <- grep(glob2rx(paste(substr(cols, 1, 3), "*", substr(cols, nchar(cols)-5, nchar(cols)), sep = "")), tmpColNames)
-  if (length(matchCols) > 1)
-  {
-    MajorDiagInfo[,cols]      <- as.integer(as.logical(rowSums(MinorDiagInfo[,matchCols])))
-  }
-  else
-  {
-    MajorDiagInfo[,cols]      <- as.integer(as.logical(MinorDiagInfo[,matchCols]))
-  }
-  if (length(matchCols) > 1)
-  {
-    matchedxColumns[count]    <- toString(paste(tmpColNames[matchCols], "", sep = ""))
-  }
-  else
-  {
-    matchedxColumns[count]    <- toString(tmpColNames[matchCols])
-  }
-  count <- count + 1
-}
-
-
-# Finally for lifetime ---------------------------------------------------
-namesLifetime                 <- paste(allMajorCodes, "_lifetime", sep = "")
-count                         <- 1
-matchedLColumns               <- ""
-for (cols in namesLifetime)
-{
-  matchCols                   <- grep(glob2rx(paste(substr(cols, 1, 3), "*_lifetime", sep = "")), tmpColNames)
-  if (length(matchCols) > 1)
-  {
-    MajorDiagInfo[,cols]      <- as.integer(as.logical(rowSums(MinorDiagInfo[,matchCols])))
-  }
-  else
-  {
-    MajorDiagInfo[,cols]      <- as.integer(as.logical(MinorDiagInfo[,matchCols]))
-  }
-  if (length(matchCols) > 1)
-  {
-    matchedLColumns[count]    <- toString(paste(tmpColNames[matchCols], "", sep = ""))
-  }
-  else
-  {
-    matchedLColumns[count]    <- toString(tmpColNames[matchCols])
-  }
-  count <- count + 1
-}
-
-
-# Save results ------------------------------------------------------------
-# Minor codes
-outputName <- paste(as.character(Sys.Date()), "-MoBa-ParsedNPR_allCodes.csv", sep = "")
-fwrite(MinorDiagInfo, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-# write.table(MinorDiagInfo, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-
-# Major codes
-outputName <- paste(as.character(Sys.Date()), "-MoBa-ParsedNPR_majorCodes.csv", sep = "")
-fwrite(MajorDiagInfo, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-# write.table(MajorDiagInfo, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-
-
-# Split info by year ------------------------------------------------------
-dirOutput     <- file.path(dirOutput, "splitInfo")
-if (!dir.exists(dirOutput))
-{
-  dir.create(dirOutput)
-}
-
-# All (minor) codes
-for (times in uqTimePoints)
-{
-  toKeepCols  <- c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", "WithdrawnConsent18years", 
-                   colnames(MinorDiagInfo[grep(glob2rx(paste("*_*", times, sep = "")), 
-                                               colnames(MinorDiagInfo))]))
-  temp        <- MinorDiagInfo[, toKeepCols]
-  
-  outputName  <- paste(as.character(Sys.Date()), "-MoBa-ParsedNPR_allCodes-", times, ".csv", sep = "")
-  fwrite(temp, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-  # write.table(temp, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-  
-}
-
-# Minor codes - lifetime
-toKeepCols  <- c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", "WithdrawnConsent18years", 
-                 colnames(MinorDiagInfo[grep(glob2rx("*_*lifetime"), 
-                                             colnames(MinorDiagInfo))]))
-temp        <- MinorDiagInfo[, toKeepCols]
-
-outputName  <- paste(as.character(Sys.Date()), "-MoBa-ParsedNPR_allCodes-lifetime.csv", sep = "")
-fwrite(temp, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-# write.table(temp, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-
-# All major codes
-for (times in uqTimePoints)
-{
-  toKeepCols  <- c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", "WithdrawnConsent18years", 
-                   colnames(MajorDiagInfo[grep(glob2rx(paste("*_*", times, sep = "")), 
-                                               colnames(MajorDiagInfo))]))
-  temp        <- MajorDiagInfo[, toKeepCols]
-  
-  outputName  <- paste(as.character(Sys.Date()), "-MoBa-ParsedNPR_majorCodes-", times, ".csv", sep = "")
-  fwrite(temp, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-  # write.table(temp, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-  
-}
-
-# Minor codes - lifetime
-toKeepCols  <- c("ID_2445", "Role","PREG_ID_2445", "ChildNumber", "WithdrawnConsent18years", 
-                 colnames(MajorDiagInfo[grep(glob2rx("*_*lifetime"), 
-                                             colnames(MajorDiagInfo))]))
-temp        <- MajorDiagInfo[, toKeepCols]
-
-outputName  <- paste(as.character(Sys.Date()), "-MoBa-ParsedNPR_majorCodes-lifetime.csv", sep = "")
-fwrite(temp, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
-# write.table(temp, file = file.path(dirOutput, outputName), sep = "\t", row.names = F)
+# Wide files: all codes (lifetime + one file per year; the full table only if
+# makeFullMinorNPR = TRUE) and major codes (first three characters; full table too)
+makeWideFiles(dx, file.path(dirOutput, paste0(runTag, "-MoBa-ParsedNPR")),
+              major = TRUE, fullMinor = makeFullMinorNPR, maxCells = maxCells)
